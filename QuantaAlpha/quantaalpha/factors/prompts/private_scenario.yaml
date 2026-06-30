@@ -1,0 +1,364 @@
+background: |
+  You are mining alpha factors for US equities using NYSE Daily TAQ (Trade and Quotes)
+  microstructure data. Factors are implemented in Python, evaluated on a private
+  vectorized cross-sectional backtest (IC, RankIC, decile stratification, long-short
+  return, turnover, Sharpe). There is no Qlib/Yahoo pipeline — only local parquet
+  feature material and a fixed label directory.
+
+  MARKET CONTEXT
+  - Universe: US equities listed on NYSE / NASDAQ
+  - Data source: NYSE Daily TAQ — per-minute aggregated Quotes (NBBO) features
+  - Evaluation: minute-level cross-sectional, forward label = ex_log_ret_10m
+    (10-minute excess log return; benchmark-adjusted)
+  - All features are derived from NBBO Quotes (best_bid / best_ask / best_bidsiz /
+    best_asksiz). No raw Trades features are currently in the catalog.
+
+  MICROSTRUCTURE THEORY — the intellectual foundation for factor hypotheses
+
+  1. ORDER FLOW IMBALANCE (OFI)
+     Depth imbalance I = (Q_bid − Q_ask) / (Q_bid + Q_ask) ∈ [−1, +1].
+     Positive = bid side thicker (latent buy pressure). Empirically, depth imbalance
+     predicts the next mid-price change with R² > 60% at the 1-min horizon
+     (Cont, Kukanov & Stoikov 2014). imbalance_mean is the single strongest signal
+     in this dataset (IC=0.013, ICIR=0.2147). Build on it — condition it, combine it,
+     decompose it — rather than ignoring it.
+
+  2. ADVERSE SELECTION & INFORMATION ASYMMETRY
+     Informed traders hide in the order book and in aggressive trades. Their presence
+     widens spreads, raises Kyle's λ, and produces directional OFI clustering.
+     Key patterns to exploit:
+     - High spread + high |imbalance| → likely informed-trader episode
+     - Low reversal_count (quote bounce rare) → trend driven by informed flow
+     - High imbalance_kurt → rare but extreme one-sided pressure = informed burst
+     - intraday_kyle_lambda directly measures price impact per unit imbalance
+
+  3. MARKET MAKER INVENTORY ADJUSTMENT
+     Market makers widen spreads and oscillate quotes when managing inventory.
+     Quote bounce (high reversal_count) signals maker-dominant, mean-reverting
+     microstructure. spread_asymmetry (spread_when_buy ≠ spread_when_sell) reveals
+     directional adverse-selection compensation.
+
+  4. INTRADAY REGIME STRUCTURE (US equities, NYSE/NASDAQ)
+     - Open  09:30–10:30: price discovery, widest spread, highest OFI volatility
+     - Mid   10:30–15:00: tightest spread, most efficient, lowest imbalance persistence
+     - Close 15:00–16:00: institutional positioning, vol_concentration rises,
+                           imbalance_shift captures accumulation / distribution
+     Signals behave differently across regimes; conditioning on session is valuable.
+
+  5. INFORMATION THEORY OF ORDER FLOW
+     **$imbalance_entropy is a DAILY-FREQUENCY indicator** (one scalar per symbol per
+     trading day, computed from the full session's OFI bucket distribution). It is stored
+     on the minute panel for alignment only — **the value is constant within each
+     (date, sym_root, sym_suffix) day** and does not vary bar-to-bar. Do NOT treat it
+     like a minute-level series: avoid TS_MEAN/TS_STD/DELTA on $imbalance_entropy with
+     short intraday windows expecting minute-to-minute changes; use it as a daily regime
+     filter or level, combined with true minute features (e.g. $imbalance_mean).
+     Low entropy → order flow is directional and concentrated → informed trading.
+     High entropy → order flow is random → noise / maker dominant.
+     spread_HHI captures how concentrated the spread is at a single tick level.
+
+  FACTOR CONSTRUCTION PRINCIPLES FOR THIS DATASET
+
+  DO exploit:
+  - Short-term OFI momentum: TS_MEAN($imbalance_mean, 3..10) captures persistence
+  - OFI × friction interaction: $imbalance_mean / ($spread_mean + 1e-8) adjusts
+    directional signal for transaction cost (IC gain typically 10–20% over raw OFI)
+  - Regime-conditional signals: $imbalance_mean * (1 − $reversal_count) down-weights
+    maker-dominated minutes where OFI is bounce-noise
+  - Information content: NEG($imbalance_entropy) as a **daily** quality/regime signal (low entropy
+    = directional = align with imbalance sign); combine with minute $imbalance_mean, not intraday TS on entropy
+  - Intraday direction: $imbalance_shift (close minus open imbalance) captures
+    institutional accumulation patterns with a next-day / end-of-session horizon
+  - Kyle λ × OFI: $intraday_kyle_lambda * $imbalance_mean approximates expected
+    price impact from current directional pressure
+
+  AVOID:
+  - Raw mid_price levels as factor inputs (non-stationary; use differences or ratios)
+  - Dividing by spread without a floor (division by near-zero blows up in wide ticks)
+  - Combining more than 5 base feature fields (complexity gate rejects symbol_length > 200)
+  - Using label fields (ex_log_ret_10m etc.) as $fields — these are targets, not features
+
+
+source_data_template: |
+  {catalog_text}
+  - **legacy_panel_root** (multi-column daily parquets): `{legacy_root}`
+  - **per_feature_root** (one subdirectory per feature): `{per_feature_root}`
+
+  Load helper — always use this instead of hard-coding paths:
+  ```python
+  from quantaalpha.data import load_feature_long, list_available_fields
+  df = load_feature_long(["spread_mean", "imbalance_mean"])
+  # Returns: date(int YYYYMMDD), sym_root, sym_suffix(str,'None' when null),
+  #          minute(int HHMM e.g. 930), + requested feature columns
+  ```
+
+  ══════════════════════════════════════════════════════════════
+  FEATURE GLOSSARY  (all available fields with economic meaning)
+  ══════════════════════════════════════════════════════════════
+
+  ── SPREAD FEATURES  (bid-ask friction, liquidity cost) ──────
+  All spread values = best_ask − best_bid (NBBO, in USD).
+  Time-weighted (TW) aggregation: Σ(value_j × Δt_j) / T_minute.
+
+  spread_mean
+    Formula : Σ(s_j × Δt_j) / T   [TWQS — time-weighted quoted spread]
+    Meaning : Core per-minute liquidity cost. High = expensive to trade.
+              Large-cap blue chips typically 1–3 ticks; illiquid stocks >> 10 ticks.
+    Factor use: normalize other signals by spread_mean; avoid as raw factor (size bias).
+
+  spread_std
+    Formula : √[Σ((s_j − s̄)² × Δt_j) / T]
+    Meaning : Spread volatility within the minute. High = frequent liquidity shocks
+              (info arrival or HFT activity). Low = stable maker presence.
+    Factor use: quality filter; ratio spread_std/spread_mean ≈ spread CV.
+
+  spread_first
+    Formula : s at first NBBO update of the minute
+    Meaning : Opening spread of the minute — reflects initial liquidity state.
+    Factor use: spread_first vs spread_last reveals intra-minute spread trend.
+
+  spread_last
+    Formula : s at last NBBO update of the minute
+    Meaning : Closing spread of the minute — basis for next-minute cross-minute signals.
+
+  spread_max
+    Formula : max(s_j) over all NBBO updates
+    Meaning : Worst-case spread; captures liquidity crunch moments (info shock,
+              order-book thin). Institutional sweeps often coincide with spread_max spikes.
+
+  spread_min
+    Formula : min(s_j)  [usually = 1 tick = $0.01 for liquid stocks]
+    Meaning : Best-case spread. Duration at minimum reflects competitive maker presence.
+
+  spread_skew
+    Formula : Σ[Δt_j × (s_j − s̄)³ / T] / spread_std³  [TW skewness]
+    Meaning : Right-skew (positive) = rare wide-spread spikes = info shock pattern.
+              Distinguishes "structural illiquidity" (persistent wide) from
+              "shock illiquidity" (occasional burst). High skew → informed-trading suspect.
+
+  spread_kurt
+    Formula : Σ[Δt_j × (s_j − s̄)⁴ / T] / spread_std⁴  [TW kurtosis]
+    Meaning : Fat tails = extreme liquidity events. High kurt + low std = rare but
+              large institutional sweeps or information-driven spread explosions.
+
+  spread_IQR
+    Formula : Q75(s_j) − Q25(s_j)  [equal-weight interquartile range]
+    Meaning : Robust spread dispersion; less sensitive to outliers than spread_std.
+              Small IQR = spread tightly clustered around 1 tick (tight, competitive).
+              Large IQR = spread oscillates widely (fragile liquidity).
+
+  spread_ew
+    Formula : mean(s_j) unweighted  [every NBBO update counts equally]
+    Meaning : Equal-weight mean. Compare with spread_mean (TW) to detect timing bias.
+
+  spread_timing_bias
+    Formula : spread_mean (TW) − spread_ew
+    Meaning : Positive = wide spreads persist longer (structural illiquidity).
+              Negative = wide spreads are transient (isolated shocks, self-correcting).
+              Two regimes have opposite risk and predictive profiles.
+
+  spread_HHI
+    Formula : Σ(T_k / T)²  grouped by $0.01 tick bucket
+    Meaning : Herfindahl of time spent at each spread level.
+              High HHI (≈1) = spread locked at one tick all minute (large-cap, stable).
+              Low HHI = spread diffuse across many tick levels (small-cap, volatile).
+
+  spread_improvement
+    Formula : (spread_mean_OPEN_session − spread_mean_CLOSE_session) / spread_mean_OPEN
+    Meaning : Intraday spread tightening ratio. Positive = liquidity improved over day.
+              Negative = flow conditions deteriorated (info risk increasing at close).
+
+  spread_cross_mean
+    Formula : #{j : s_j crosses intraday mean} / (M − 1)
+    Meaning : Spread mean-crossing rate. High = oscillating spread (healthy maker
+              adjustments, mean-reverting). Low = persistent spread trend (information
+              or structural shift).
+
+  spread_when_buy
+    Formula : E[s_j | I_j > 0]  [TW conditional mean when imbalance > 0]
+    Meaning : Spread when buy-pressure is dominant. Captures asymmetric maker pricing
+              under directional flow — maker demands wider spread facing buy aggression.
+
+  spread_asymmetry
+    Formula : spread_when_buy − spread_when_sell
+    Meaning : Directional spread asymmetry. Positive = maker charges more when buyers
+              dominant (adverse selection from buy side). Direct evidence of informed
+              buying pressure. One of the few signals invisible to standard spread means.
+
+  ── MID-PRICE FEATURES  (true price, bid-ask bounce removed) ─
+  Mid price m_j = (best_bid_j + best_ask_j) / 2. Eliminates bid-ask bounce bias
+  (Alt-Sahalia & Yu 2009); superior to trade prices for volatility estimation.
+
+  mid_price_mean
+    Formula : Σ(m_j × Δt_j) / T   [TWAMP — time-weighted average mid price]
+    Meaning : Fair value estimate for the minute. Noise-filtered price level.
+    Factor use: Use differences or ratios — raw levels are non-stationary.
+
+  mid_price_std
+    Formula : √[Σ((m_j − m̄)² × Δt_j) / T]
+    Meaning : TW mid-price volatility — realized vol proxy without bounce bias.
+              Standard denominator for normalization (Sharpe-style per-minute scaling).
+
+  mid_price_first
+    Formula : m at first NBBO update   [= OHLC Open, bounce-free]
+    Meaning : Minute open mid price.
+
+  mid_price_last
+    Formula : m at last NBBO update    [= OHLC Close, bounce-free]
+    Meaning : Minute close mid price. Key for cross-minute return calculation.
+
+  mid_price_max
+    Formula : max(m_j)                 [= OHLC High, bounce-free]
+    Meaning : Minute high. Better than trade High (unaffected by outlier prints).
+
+  mid_price_min
+    Formula : min(m_j)                 [= OHLC Low, bounce-free]
+    Meaning : Minute low.
+
+  vol_concentration
+    Formula : mid_price_std_CLOSE_session / mid_price_std_OPEN_session
+    Meaning : Volatility ratio close/open. High ratio = institutional activity
+              concentrated at close (pre-close positioning, index rebalance).
+              Predictive of next-open gap behavior.
+
+  ── IMBALANCE / ORDER FLOW FEATURES  (directional buy/sell pressure) ─
+  Imbalance I_j = (Q_bid_j − Q_ask_j) / (Q_bid_j + Q_ask_j) ∈ [−1, +1]
+  Positive = bid side thicker = latent buy pressure. Source: NBBO BBO depth only
+  (not actual trade direction — that would require Trades data, not yet in catalog).
+
+  imbalance_mean  ★ PRIMARY SIGNAL
+    Formula : Σ(I_j × Δt_j) / T   [TW depth imbalance]
+    Meaning : Core buy/sell pressure signal. IC=0.013, ICIR=0.2147.
+              Positive → price tends to rise 10 min forward; negative → fall.
+              Strongest single predictor in the dataset.
+    Factor use: baseline benchmark; combine with spread or regime variables.
+
+  imbalance_std
+    Formula : √[Σ((I_j − Ī)² × Δt_j) / T]
+    Meaning : Imbalance stability within minute. Low std = consistent directional
+              pressure (reliable signal). High std = noisy / oscillating (market
+              maker dominant). Use as signal quality filter: imbalance_mean /
+              (imbalance_std + ε) ≈ Sharpe of OFI within the minute.
+
+  imbalance_kurt
+    Formula : E[(I_j − Ī)⁴] / std⁴   [equal-weight kurtosis]
+    Meaning : Fat-tailed imbalance distribution → rare extreme one-sided pressure
+              = informed trader burst. High kurt + strong imbalance_mean = high
+              conviction signal. Low kurt = smooth, diffuse imbalance.
+
+  imbalance_shift
+    Formula : imbalance_mean_CLOSE_session − imbalance_mean_OPEN_session
+    Meaning : Intraday imbalance direction change. Positive = capital flowing in
+              at close (institutional accumulation); negative = distribution.
+              Captures the classic "buy open, sell close" institutional pattern.
+
+  imbalance_pos_ratio
+    Formula : Σ[Δt_j : I_j > 0] / T   [time fraction in buy-pressure state]
+    Meaning : Distinct from imbalance_mean: less sensitive to magnitude extremes.
+              Captures "how often" rather than "how strongly" buy side dominates.
+              Useful when imbalance_mean is driven by a few spike ticks.
+
+  imbalance_entropy  ★ DAILY-FREQUENCY (not minute-varying)
+    Formula : −Σ p_k × log(p_k)  across 5 equal OFI buckets (aggregated over the full day)
+    Frequency: **Daily** — one value per (date, sym_root, sym_suffix); broadcast onto
+              every minute row of that day for panel merge. Intraday TS_* on this field
+              does NOT capture new information within the day.
+    Meaning : Order flow predictability at the daily level. Low entropy = directional /
+              concentrated = informed trading dominant. High entropy = random / dispersed = noise.
+              Normalize: entropy / log(5) ∈ [0, 1].
+    Factor use: NEG($imbalance_entropy) as daily regime filter; multiply with minute OFI
+              (e.g. $imbalance_mean) rather than applying short TS windows to entropy alone.
+
+  intraday_kyle_lambda
+    Formula : Cov(Δmid_j, I_j) / Var(I_j)   [OLS from NBBO quotes, no Trades needed]
+    Meaning : Kyle's λ estimated from quotes alone. Price impact per unit imbalance.
+              High λ = thin book, price moves a lot per OFI unit = informed market.
+              Low λ = deep book, resilient to pressure = maker-dominant.
+    Factor use: $intraday_kyle_lambda × $imbalance_mean ≈ expected Δprice from OFI.
+
+  ── PATH-DEPENDENT FEATURES  (microstructure regime classification) ─
+
+  reversal_count
+    Formula : #{j : Δm_j × Δm_{j−1} < 0} / (M − 2)   [normalized]
+    Meaning : Quote reversal rate. High = market maker dominant (bid-ask bounce,
+              mean-reverting). Low = informed-trader trend (directional persistence).
+              Key regime discriminator: same imbalance means very different things
+              in high-reversal vs low-reversal minutes.
+    Factor use: (1 − $reversal_count) as informed-trader regime weight.
+
+  spread_cross_mean  [see Spread section above for formula]
+    Meaning : High crossing rate = oscillating / healthy maker. Low = trending spread.
+
+
+interface: |
+  Implement each factor in `factor.py` inside the workspace. You may import numpy / pandas /
+  pyarrow. Prefer vectorized operations on DataFrames. Do not access the public internet.
+
+  **Required output file:** `factor_output.parquet`
+  - Long format columns: `date`, `sym_root`, `sym_suffix`, `minute`, `<factor_name>`
+  - `<factor_name>` must match the task's `factor_name` (one column only per workspace).
+  - Types: int date/minute; string sym_suffix (use 'None' for missing); sym_root as in source.
+
+  CODING CONVENTIONS
+  - Always winsorize or rank the final factor output to remove outlier distortion
+  - Fill NaN with 0.0 or median cross-sectionally before writing — never leave NaN
+  - When dividing by spread, add a small floor: / ($spread_mean + 1e-8)
+  - Do not use pandas .fillna() or .astype() in expressions — use numpy operations
+  - Expression DSL uses $field_name tokens and function_lib operators only
+
+
+output_format: |
+  The coding agent must finish by writing `factor_output.parquet` as above. The runner
+  merges all factor columns per round, writes daily shards under `factor_bt_input/`, and
+  calls the private backtest engine. Metrics arrive as `summary.csv` rows with columns:
+  `factor`, `IC`, `ICIR`, `RankIC`, `RankICIR`, `long_ret`, `short_ret`,
+  `long_short_ret`, `volatility`, `sharpe`, `turnover`.
+
+
+simulator: |
+  Evaluation uses `single_factor_bt` (research/backtest/README.md):
+  minute-level cross-sectional Pearson IC / rank IC, decile portfolios, inner
+  top/bottom long-short, annualized long-short return, volatility, Sharpe, turnover.
+  Forward label priority: `ex_log_ret_10m` → `log_ret_10m` → `ex_ret_10m` → `ret_10m`.
+
+  EVALUATION CRITERIA — factors are judged on ALL of the following:
+  1. |RankIC| > 0.02  and  |ICIR| > 0.3     (signal existence threshold)
+  2. long_short_ret consistent with hypothesis sign (directionally meaningful alpha)
+  3. sharpe and volatility reasonable for the turnover level (risk-adjusted, not pure noise)
+  4. turnover < 0.95                         (not pure noise / high-frequency artefact)
+
+  A factor passing only criterion 1 but failing 2–4 is considered low quality.
+  Prefer stable RankIC / ICIR together with economically aligned long_short_ret and sharpe.
+
+  **Critical:** label column names are for backtest only — never use them as $fields in
+  factor expressions (they are targets, not features; using them is lookahead and will
+  fail). Likewise never use panel keys (date, sym_root, sym_suffix, minute) or
+  pandas/Python code in expressions — only function_lib operators on $feature_name tokens.
+
+
+experiment_setting: |
+  One hypothesis round may propose multiple factors; each factor has its own workspace.
+  After code generation, factors are backtested together in one merged feature directory.
+
+  HYPOTHESIS QUALITY CHECKLIST (verify before submitting):
+  ✓ Economic story: can you explain in one sentence why this combination of microstructure
+    signals predicts 10-min future return?
+  ✓ Direction: is the predicted sign of the factor–return relationship correct given theory?
+  ✓ Novelty: does this factor capture a mechanism not already in the factor zoo?
+  ✓ Complexity: does the expression use ≤ 5 base $fields and symbol_length < 200?
+  ✓ No lookahead: are you using only features from the current-minute data (t)?
+  ✓ Frequency: if using $imbalance_entropy, treat it as **daily** (constant within day),
+    not as a minute series — combine with minute fields, do not TS-roll entropy intraday
+
+  ENCOURAGED HYPOTHESIS CLASSES:
+  A. OFI signal conditioning  — vary how imbalance_mean is filtered / weighted
+  B. Friction-adjusted OFI    — combine imbalance with spread to net out cost
+  C. Regime-conditional       — multiply OFI by informed-trader regime indicator
+  D. Information-theory angle — entropy / HHI as standalone or as scaling weight
+  E. Intraday decomposition   — session-level differences (shift, improvement, concentration)
+  F. Kyle-λ based             — use intraday_kyle_lambda as price-impact proxy
+
+
+rich_style_description: |
+  Present hypotheses as concise bullet observations; cite metrics with 4 decimals for IC family.
+  For each proposed factor, state: (1) economic mechanism, (2) expected IC sign, (3) novel angle.

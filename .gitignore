@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+*.so
+.Python
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# 数据与缓存（本地生成，不入库）
+*.parquet
+*.feather
+*.arrow
+model/cache/
+**/_cache/
+
+# 外部原始行情（symlink 或本地路径）
+public/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# 临时输出
+base_data_process/simple_factors/
+base_data_process/label/
+base_data_process/logs/
+backtest/output/
+
+# 密钥（切勿提交）
+.env
+**/.env
+
+# 模型运行产物
+model/output/
+*.pkl
+*.log
+
+# 单因子回测详细输出（保留 summary.csv）
+因子库_final/output/*
+!因子库_final/output/summary.csv
+
+# 本地数据样本
+data_format/

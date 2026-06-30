@@ -1,0 +1,64 @@
+# 本地 / CI：配合 QUANTALPHA_LLM_STUB=1 跑通 propose→construct→calc→backtest→feedback
+# 单方向、单 loop、关闭 evolution，缩短路径；真实挖掘请用 configs/experiment.yaml
+
+planning:
+  enabled: true
+  num_directions: 1
+  max_attempts: 2
+  use_llm: true
+  allow_fallback: true
+  prompt_file: planning_prompts.yaml
+
+execution:
+  max_loops: 1
+  steps_per_loop: 5
+  step_n: null
+  use_local: true
+  parallel_execution: false
+  branch_log_root: log
+  branch_log_prefix: branch
+
+evolution:
+  enabled: false
+  max_rounds: 1
+  parallel_enabled: false
+  fresh_start: true
+  cleanup_on_finish: false
+
+quality_gate:
+  consistency_enabled: false
+  complexity_enabled: true
+  redundancy_enabled: true
+  consistency_strict_mode: false
+  max_correction_attempts: 2
+
+factor:
+  factors_per_hypothesis: 1
+  complexity:
+    symbol_length_threshold: 200
+    base_features_threshold: 5
+    free_args_ratio_threshold: 0.5
+  duplication:
+    enabled: true
+    threshold: 5
+    factor_zoo_path: null
+
+backtest:
+  use_docker: false
+  timeout: 800
+  qlib:
+    config_name: conf_baseline.yaml
+
+llm:
+  factor_mining_timeout: 999999
+  max_retries: 2
+  retry_delay: 0.5
+  json_mode_strict: true
+
+logging:
+  level: INFO
+  save_snapshots: true
+  save_trajectory_pool: true
+
+prompts:
+  planning: planning_prompts.yaml

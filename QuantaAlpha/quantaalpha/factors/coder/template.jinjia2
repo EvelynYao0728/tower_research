@@ -1,0 +1,23 @@
+
+import pandas as pd
+import numpy as np
+import os
+from quantaalpha.factors.coder.factor_eval import (
+    calculate_factor_to_parquet,
+    resolve_factor_eval_workers,
+)
+
+
+def calculate_factor(expr: str, name: str):
+    calculate_factor_to_parquet(
+        expr,
+        name,
+        "factor_output.parquet",
+        workers=resolve_factor_eval_workers(),
+    )
+
+
+if __name__ == '__main__':
+    expr = "{{ expression }}"
+    name = "{{ factor_name }}"
+    calculate_factor(expr, name)

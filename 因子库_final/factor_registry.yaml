@@ -1,0 +1,38 @@
+# 28 个已入库因子（与 FACTORS_CONSTRUCTION.md 一致）
+# 目录名 = parquet 列名 = 回测 factor 名
+factors:
+  # B 族 · 成交流进阶
+  - name: B4_cross_dup_price_spread_bps
+  - name: B5_trade_dup_vwap_premium
+  # C 族 · 报价结构
+  - name: C3_oir
+  - name: C5_layer_stacking_x_flow_signed_1m
+  - name: C8_spread_asymm_vol
+  # D 族 · NBBO 动态
+  - name: D3_nbbo_size_imb
+  - name: D5_spread_diff_mean
+  # E 族 · 微观结构
+  - name: E6_trade_position_skew
+  # S 族 · 基础深度
+  - name: imbalance_mean
+  # MB 族 · 分钟指标衍生
+  - name: ret_1m
+  - name: ret_5m
+  - name: ret_10m_past
+  - name: clv
+  - name: range_pos_5m
+  - name: dist_from_5m_high
+  - name: dist_from_5m_low
+  - name: open_mean_dev
+  - name: imb_current
+  - name: imb_trend
+  - name: spread_x_imb
+  - name: liq_adj_ret
+  - name: vol_adj_imb
+  - name: clv_x_imb
+  # O 族 · 正交因子
+  - name: odd_lot_ofi
+  - name: mid_trade_share
+  - name: mid_trade_vol_share
+  - name: signed_jump_var
+  - name: realized_skew_tick
