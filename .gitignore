@@ -41,14 +41,16 @@ backtest/output/
 .env
 **/.env
 
-# 模型运行产物
-model/output/
-*.pkl
-*.log
+# 模型运行产物（排除大 csv / 二进制 / 日志）
+model/output/**/minute_metrics.csv
+model/output/**/test_predictions.csv
+model/output/**/*.pkl
+model/output/**/*.log
 
-# 单因子回测详细输出（保留 summary.csv）
-因子库_final/output/*
-!因子库_final/output/summary.csv
+# 单因子回测（排除大 csv）
+因子库_final/output/**/metrics_per_minute.csv
+因子库_final/output/**/decile_inner_long_short.csv
+因子库_final/output/**/_cache/
 
 # 本地数据样本
 data_format/
